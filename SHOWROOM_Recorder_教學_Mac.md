@@ -28,15 +28,12 @@ brew install streamlink
 
 ---
 
-## 🎮 第二步：整Mac App
+## 🎮 第二步：Mac App
 
 ### 方法好簡單：
-1. 打開 **Automator** (應該喺Application度)
-2. 揀 **New Document**
-3. 揀 **Application**
-4. 喺左手邊search "AppleScript" → 拖 "Run AppleScript" 去右手邊
-5. Delete晒原本既code，copy `showroom-recorder-mac-gui.scpt` 入面既code貼上去
-6. Save做 `SHOWROOM Recorder.app`
+1. 去release嗰度下載個Mac嘅zip
+2. 打開個folder
+3. click `SHOWROOM-Recorder.app`
 
 ---
 
@@ -49,7 +46,10 @@ brew install streamlink
 - **Record** - 開始錄影
 - **View Scheduled** - 睇定時錄影
 - **Open Recordings Folder** - 開recordings folder
-- **Quit** - 離開
+- **Setting -
+- **Quit** - 離開 -
+- **Open Folder** - 睇錄影 -
+- **Edit List** - 加／睇返showroom link 
 
 ### 加入Channel：
 1. 揀 **Add Channel**
