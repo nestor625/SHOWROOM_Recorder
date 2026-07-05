@@ -48,14 +48,14 @@ Each idol has their own URL, for example:
 
 ### Record Single:
 1. Click on the channel name (to highlight it)
-2. Click **Record** button
+2. Click **🔴 Record** button (or just double-click the channel)
 
 ### Record All:
-1. Click **All** button
+1. Click **🔴 Record All** button
 
 ### Stop Recording:
-1. Select the recording you want to stop
-2. Click **Stop** button
+1. In the **📡 Now Recording** panel, select the recording you want to stop
+2. Click **⏹ Stop** button (with nothing selected it stops all)
 
 ---
 
@@ -70,7 +70,7 @@ Example:
 `Anna-SHOWROOM-2026-03-04_22_00.mp4`
 
 ### How to change save location?
-1. Click **Browse** button
+1. Click **📁 Browse…** button
 2. Choose your preferred folder
 3. Done!
 
@@ -100,7 +100,7 @@ Example:
 It will automatically start recording at the set time!
 
 ### View schedules:
-1. Click **View** button
+1. Click **📅 View Scheduled** button
 2. Shows all scheduled recordings
 
 ---

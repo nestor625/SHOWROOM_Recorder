@@ -41,26 +41,39 @@ brew install streamlink
 
 打開整好既 `SHOWROOM Recorder.app`
 
+主Menu頂會顯示：錄影儲存位置、有幾多個channel、而家有幾多個正在錄影。
+
 ### Menu有呢啲選擇：
-- **Add Channel** - 加入channel
-- **Record** - 開始錄影
-- **View Scheduled** - 睇定時錄影
-- **Open Recordings Folder** - 開recordings folder
-- **Setting -
-- **Quit** - 離開 -
-- **Open Folder** - 睇錄影 -
-- **Edit List** - 加／睇返showroom link 
+- **🔴 Record…** - 揀一個或多個channel開始錄影
+- **🔴 Record ALL** - 一次過錄晒所有channel
+- **⏹ Stop recording…** - 停止其中一個，或者全部停
+- **📡 Live status** - 睇而家有咩正在錄緊
+- **➕ Add channel** - 加入channel
+- **🗑 Delete channel…** - 揀走唔要既channel
+- **⏰ Schedule recording…** - 設定時間，夾時自動錄
+- **📅 View scheduled…** - 睇／取消已設定既定時錄影
+- **📂 Open recordings folder** - 打開錄影folder
+- **📁 Change save location…** - 揀錄影儲存去邊
+- **📝 Edit channel list (raw)** - 直接編輯channel清單
+- **❌ Quit** - 離開
 
 ### 加入Channel：
-1. 揀 **Add Channel**
+1. 揀 **➕ Add channel**
 2. URL，例如：`https://www.showroom-live.com/r/LOVE_ANNA_YAMAMOTO`
 3. Name，例如：`山本杏奈`
 4. OK
 
 ### 開始錄影：
-1. 揀 **Record**
-2. 揀你想錄既channel
+1. 揀 **🔴 Record…**
+2. 揀你想錄既channel（可以㨂多過一個）
 3. 會彈Terminal開始錄
+
+### 定時錄影：
+1. 揀 **⏰ Schedule recording…**
+2. 揀channel
+3. 打入時間（格式：`YYYY-MM-DD HH:MM`，例如 `2026-07-05 22:00`）
+4. 夾到時間會自動開始錄（Mac要開著；就算screen sleep都會照錄）
+5. 可以喺 **📅 View scheduled…** 度睇返或者取消
 
 ---
 
