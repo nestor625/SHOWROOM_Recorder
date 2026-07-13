@@ -161,6 +161,11 @@ function Get-ProcessCommandLine([int]$processId) {
     }
 }
 
+function Get-InteractiveTaskPrincipal {
+    $userId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    return New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
+}
+
 function Wait-ProcessExit($process, [int]$timeoutMilliseconds = 5000) {
     if (-not $process) { return $true }
     try {
@@ -417,8 +422,9 @@ function Enable-AutoCheck($ch) {
         $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $workerArgument
         $trigger = New-ScheduledTaskTrigger -AtLogOn
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -Hidden -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Description "Auto-check $($ch.name)" -Force | Out-Null
-        Start-ScheduledTask -TaskName $taskName
+        $principal = Get-InteractiveTaskPrincipal
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "Auto-check $($ch.name)" -Force -ErrorAction Stop | Out-Null
+        Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
 
         if (-not (Test-AutoCheckEnabled ([string]$ch.url))) {
             Save-AutoCheckUrls (@((Get-AutoCheckUrls) + [string]$ch.url))
@@ -1181,8 +1187,9 @@ $scheduleBtn.Add_Click({
             $action = New-ScheduledTaskAction -Execute $streamlinkPath -Argument $streamlinkArguments
             $trigger = New-ScheduledTaskTrigger -Once -At $scheduleDateTime
             $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+            $principal = Get-InteractiveTaskPrincipal
 
-            Register-ScheduledTask -TaskName $taskName -Trigger $trigger -Action $action -Settings $settings -Description "Record $($ch.name)" -Force | Out-Null
+            Register-ScheduledTask -TaskName $taskName -Trigger $trigger -Action $action -Settings $settings -Principal $principal -Description "Record $($ch.name)" -Force -ErrorAction Stop | Out-Null
 
             Set-Status "Scheduled: $($ch.name) at $scheduleTimeStr" 'ok'
         }
