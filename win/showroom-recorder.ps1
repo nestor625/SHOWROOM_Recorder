@@ -45,32 +45,603 @@ function Set-Status($text, $kind) {
     }
 }
 
+function ConvertTo-WindowsCommandLineArgument([AllowEmptyString()][string]$argument) {
+    if ($argument -notmatch '[\s"]') { return $argument }
+
+    $quoted = New-Object System.Text.StringBuilder
+    [void]$quoted.Append('"')
+    $backslashCount = 0
+    foreach ($character in $argument.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashCount++
+            continue
+        }
+        if ($character -eq '"') {
+            [void]$quoted.Append('\' * ($backslashCount * 2 + 1))
+            [void]$quoted.Append('"')
+        } else {
+            [void]$quoted.Append('\' * $backslashCount)
+            [void]$quoted.Append($character)
+        }
+        $backslashCount = 0
+    }
+    [void]$quoted.Append('\' * ($backslashCount * 2))
+    [void]$quoted.Append('"')
+    return $quoted.ToString()
+}
+
+function Join-WindowsCommandLine([string[]]$arguments) {
+    return (($arguments | ForEach-Object { ConvertTo-WindowsCommandLineArgument ([string]$_) }) -join ' ')
+}
+
 function Update-ChannelHeader {
-    $gChannels.Text = "  🎬  Channels  ($($global:channels.Count))"
+    $autoCheckCount = @(Get-AutoCheckUrls).Count
+    $gChannels.Text = "  🎬  Channels  ($($global:channels.Count))  •  Auto Check: $autoCheckCount"
+}
+
+function Get-ChannelId([string]$url) {
+    $hash = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($url)
+        $digest = $hash.ComputeHash($bytes)
+        return (([BitConverter]::ToString($digest) -replace '-', '').Substring(0, 16).ToLowerInvariant())
+    } finally {
+        $hash.Dispose()
+    }
+}
+
+function Ensure-AutoDirectories {
+    foreach ($path in @($dataDir, $autoJobsDir, $autoStatusDir, $autoLogsDir)) {
+        if (-not (Test-Path -LiteralPath $path)) {
+            New-Item -ItemType Directory -Path $path -Force | Out-Null
+        }
+    }
+}
+
+function Get-AutoCheckUrls {
+    if (-not (Test-Path -LiteralPath $autoCheckFile)) { return @() }
+
+    try {
+        $savedUrls = Get-Content -LiteralPath $autoCheckFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        return @($savedUrls | Where-Object { $_ -is [string] -and -not [string]::IsNullOrWhiteSpace($_) })
+    } catch {
+        Write-Host "Error loading auto-check settings: $_"
+        return @()
+    }
+}
+
+function Save-AutoCheckUrls([string[]]$urls) {
+    Ensure-AutoDirectories
+    $normalizedUrls = @($urls | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+    $temporaryPath = Join-Path $dataDir ("auto-check-{0}.tmp" -f [System.Guid]::NewGuid().ToString('N'))
+    try {
+        $json = ConvertTo-Json -InputObject @($normalizedUrls)
+        [System.IO.File]::WriteAllText($temporaryPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $temporaryPath -Destination $autoCheckFile -Force
+    } finally {
+        if (Test-Path -LiteralPath $temporaryPath) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-AutoCheckEnabled([string]$url) {
+    return (Get-AutoCheckUrls) -contains $url
+}
+
+function Get-AutoCheckPaths([string]$url) {
+    $channelId = Get-ChannelId $url
+    return [pscustomobject]@{
+        id = $channelId
+        url = $url
+        taskName = "SHOWROOM_AUTO_$channelId"
+        worker = Join-Path $autoJobsDir "auto-$channelId.ps1"
+        status = Join-Path $autoStatusDir "auto-$channelId.json"
+        log = Join-Path $autoLogsDir "auto-$channelId.log"
+    }
+}
+
+function Read-AutoStatus([string]$url) {
+    $statusPath = (Get-AutoCheckPaths $url).status
+    if (-not (Test-Path -LiteralPath $statusPath)) { return $null }
+
+    try {
+        return Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+}
+
+function Get-ProcessCommandLine([int]$processId) {
+    try {
+        $cimProcess = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $processId" -ErrorAction Stop
+        return [string]$cimProcess.CommandLine
+    } catch {
+        return $null
+    }
+}
+
+function Wait-ProcessExit($process, [int]$timeoutMilliseconds = 5000) {
+    if (-not $process) { return $true }
+    try {
+        if ($process.HasExited) { return $true }
+        [void]$process.WaitForExit($timeoutMilliseconds)
+        return $process.HasExited
+    } catch {
+        return -not (Get-Process -Id $process.Id -ErrorAction SilentlyContinue)
+    }
+}
+
+function Wait-ScheduledTaskStopped([string]$taskName, [int]$timeoutMilliseconds = 5000) {
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($timeoutMilliseconds)
+    do {
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if (-not $task -or $task.State -ne 'Running') { return $true }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return $false
+}
+
+function Test-StatusRecordingProcess($status) {
+    if (-not $status -or $status.state -ne 'recording' -or -not $status.processId -or -not $status.streamStartUtc -or -not $status.url -or -not $status.output) { return $false }
+
+    try {
+        $recordedStartTime = [DateTime]::Parse([string]$status.streamStartUtc)
+        $process = Get-Process -Id ([int]$status.processId) -ErrorAction SilentlyContinue
+        if (-not $process) { return $false }
+        if ($process.StartTime.ToUniversalTime().Ticks -ne $recordedStartTime.ToUniversalTime().Ticks) { return $false }
+        $expectedArguments = Join-WindowsCommandLine @([string]$status.url, 'best', '-o', [string]$status.output, '--force', '--retry-streams', '30')
+        $commandLine = Get-ProcessCommandLine $process.Id
+        return $commandLine -and $commandLine.EndsWith($expectedArguments, [System.StringComparison]::Ordinal)
+    } catch {
+        return $false
+    }
+}
+
+function Stop-StatusRecording($status) {
+    if (-not $status -or -not $status.processId) { return $true }
+
+    $process = Get-Process -Id ([int]$status.processId) -ErrorAction SilentlyContinue
+    if (-not $process) { return $true }
+    if (-not (Test-StatusRecordingProcess $status)) { return $false }
+    try {
+        $process.Kill()
+        return Wait-ProcessExit $process
+    } catch {
+        return $false
+    }
+}
+
+function Test-StatusWorkerProcess($status, $paths) {
+    if (-not $status -or -not $status.workerProcessId -or -not $status.workerStartUtc -or -not $status.workerPath) { return $false }
+    if ([string]$status.workerPath -ne [string]$paths.worker) { return $false }
+
+    try {
+        $recordedStartTime = [DateTime]::Parse([string]$status.workerStartUtc)
+        $workerProcess = Get-Process -Id ([int]$status.workerProcessId) -ErrorAction SilentlyContinue
+        if (-not $workerProcess) { return $false }
+        if ($workerProcess.StartTime.ToUniversalTime().Ticks -ne $recordedStartTime.ToUniversalTime().Ticks) { return $false }
+        if ($workerProcess.ProcessName -ine 'powershell') { return $false }
+        $expectedArguments = Join-WindowsCommandLine @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', [string]$paths.worker)
+        $commandLine = Get-ProcessCommandLine $workerProcess.Id
+        return $commandLine -and $commandLine.EndsWith($expectedArguments, [System.StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        return $false
+    }
+}
+
+function Stop-StatusWorker($status) {
+    if (-not $status -or -not $status.workerProcessId) { return $true }
+
+    $workerProcess = Get-Process -Id ([int]$status.workerProcessId) -ErrorAction SilentlyContinue
+    if (-not $workerProcess) { return $true }
+    $statusPaths = [pscustomobject]@{ worker = [string]$status.workerPath }
+    if (-not (Test-StatusWorkerProcess $status $statusPaths)) { return $false }
+    try {
+        $workerProcess.Kill()
+        return Wait-ProcessExit $workerProcess
+    } catch {
+        return $false
+    }
+}
+
+function Get-AutoCheckWorkerArgument($paths) {
+    return Join-WindowsCommandLine @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', [string]$paths.worker)
+}
+
+function Test-AutoCheckTaskHealthy($task, $paths) {
+    if (-not $task -or $task.State -eq 'Disabled' -or $task.State -ne 'Running') { return $false }
+    if (-not (Test-Path -LiteralPath $paths.worker)) { return $false }
+    $actions = @($task.Actions)
+    if ($actions.Count -ne 1) { return $false }
+    if ([System.IO.Path]::GetFileName([string]$actions[0].Execute) -ine 'powershell.exe') { return $false }
+    if ([string]$actions[0].Arguments -ne (Get-AutoCheckWorkerArgument $paths)) { return $false }
+    $status = Read-AutoStatus ([string]$paths.url)
+    return (Test-StatusWorkerProcess $status $paths)
+}
+
+function New-AutoCheckWorker($ch, $paths, [string]$streamlinkPath) {
+    $encodedUrl = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes([string]$ch.url))
+    $encodedName = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes([string]$ch.name))
+    $encodedSavePath = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes([string]$saveBox.Text))
+    $encodedStatusPath = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes([string]$paths.status))
+    $encodedLogPath = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes([string]$paths.log))
+    $encodedStreamlinkPath = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($streamlinkPath))
+    $encodedWorkerPath = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes([string]$paths.worker))
+
+    $workerContent = @'
+$ErrorActionPreference = 'Stop'
+$url = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__URL__'))
+$name = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__NAME__'))
+$savePath = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__SAVE_PATH__'))
+$statusPath = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__STATUS_PATH__'))
+$logPath = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__LOG_PATH__'))
+$streamlink = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__STREAMLINK_PATH__'))
+$workerPath = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__WORKER_PATH__'))
+
+function ConvertTo-WindowsCommandLineArgument([AllowEmptyString()][string]$argument) {
+    if ($argument -notmatch '[\s"]') { return $argument }
+
+    $quoted = New-Object System.Text.StringBuilder
+    [void]$quoted.Append('"')
+    $backslashCount = 0
+    foreach ($character in $argument.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashCount++
+            continue
+        }
+        if ($character -eq '"') {
+            [void]$quoted.Append('\' * ($backslashCount * 2 + 1))
+            [void]$quoted.Append('"')
+        } else {
+            [void]$quoted.Append('\' * $backslashCount)
+            [void]$quoted.Append($character)
+        }
+        $backslashCount = 0
+    }
+    [void]$quoted.Append('\' * ($backslashCount * 2))
+    [void]$quoted.Append('"')
+    return $quoted.ToString()
+}
+
+function Join-WindowsCommandLine([string[]]$arguments) {
+    return (($arguments | ForEach-Object { ConvertTo-WindowsCommandLineArgument ([string]$_) }) -join ' ')
+}
+
+function Write-AutoWorkerStatus($status) {
+    $temporaryPath = "$statusPath.$([System.Guid]::NewGuid().ToString('N')).tmp"
+    $status.updatedUtc = [DateTime]::UtcNow.ToString('o')
+    $json = $status | ConvertTo-Json -Depth 5
+    [System.IO.File]::WriteAllText($temporaryPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+    Move-Item -LiteralPath $temporaryPath -Destination $statusPath -Force
+}
+
+function Write-AutoWorkerLog([string]$message) {
+    $line = "$(Get-Date -Format 'o') $message"
+    Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8
+    if ((Test-Path -LiteralPath $logPath) -and (Get-Item -LiteralPath $logPath).Length -gt 1048576) {
+        Move-Item -LiteralPath $logPath -Destination "$logPath.1" -Force
+    }
+}
+
+New-Item -ItemType Directory -Path $savePath -Force | Out-Null
+$workerProcess = [System.Diagnostics.Process]::GetCurrentProcess()
+while ($true) {
+    try {
+        Write-AutoWorkerStatus ([ordered]@{ url = $url; name = $name; state = 'waiting'; output = $null; processId = $null; streamStartUtc = $null; workerProcessId = $workerProcess.Id; workerStartUtc = $workerProcess.StartTime.ToUniversalTime().ToString("o"); workerPath = $workerPath; lastError = $null })
+        $probe = Start-Process -FilePath $streamlink -ArgumentList (Join-WindowsCommandLine @($url, 'best', '--stream-url')) -Wait -PassThru -WindowStyle Hidden
+        if ($probe.ExitCode -ne 0) {
+            Start-Sleep -Seconds 60
+            continue
+        }
+
+        do {
+            $timestamp = Get-Date -Format 'yyyy-MM-dd_HH_mm'
+            $output = Join-Path $savePath "$name-SHOWROOM-$timestamp.mp4"
+            if (Test-Path -LiteralPath $output) { Start-Sleep -Seconds 60 }
+        } while (Test-Path -LiteralPath $output)
+
+        # Keep the worker equivalent to: streamlink URL best -o OUTPUT --force --retry-streams 30
+        $recording = Start-Process -FilePath $streamlink -ArgumentList (Join-WindowsCommandLine @($url, 'best', '-o', $output, '--force', '--retry-streams', '30')) -PassThru -WindowStyle Hidden
+        Write-AutoWorkerStatus ([ordered]@{
+            url = $url
+            name = $name
+            state = 'recording'
+            output = $output
+            processId = $recording.Id
+            streamStartUtc = $recording.StartTime.ToUniversalTime().ToString("o")
+            workerProcessId = $workerProcess.Id
+            workerStartUtc = $workerProcess.StartTime.ToUniversalTime().ToString("o")
+            workerPath = $workerPath
+            lastError = $null
+        })
+        $recording.WaitForExit()
+        Write-AutoWorkerLog "Recording exited with code $($recording.ExitCode): $output"
+    } catch {
+        Write-AutoWorkerLog "$_"
+        Write-AutoWorkerStatus ([ordered]@{ url = $url; name = $name; state = 'error'; output = $null; processId = $null; streamStartUtc = $null; workerProcessId = $workerProcess.Id; workerStartUtc = $workerProcess.StartTime.ToUniversalTime().ToString("o"); workerPath = $workerPath; lastError = [string]$_ })
+    }
+    Start-Sleep -Seconds 60
+}
+'@
+
+    $workerContent = $workerContent.Replace('__URL__', $encodedUrl).Replace('__NAME__', $encodedName).Replace('__SAVE_PATH__', $encodedSavePath).Replace('__STATUS_PATH__', $encodedStatusPath).Replace('__LOG_PATH__', $encodedLogPath).Replace('__STREAMLINK_PATH__', $encodedStreamlinkPath).Replace('__WORKER_PATH__', $encodedWorkerPath)
+    [System.IO.File]::WriteAllText($paths.worker, $workerContent, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Remove-AutoCheckArtifacts($paths) {
+    foreach ($path in @($paths.worker, $paths.status, $paths.log, "$($paths.log).1")) {
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Enable-AutoCheck($ch) {
+    if (-not $ch -or [string]::IsNullOrWhiteSpace([string]$ch.url) -or [string]::IsNullOrWhiteSpace([string]$ch.name)) { return $false }
+
+    Ensure-AutoDirectories
+    $paths = Get-AutoCheckPaths ([string]$ch.url)
+    $taskName = $paths.taskName
+    $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($existingTask -and (Test-AutoCheckTaskHealthy $existingTask $paths)) {
+        if (-not (Test-AutoCheckEnabled ([string]$ch.url))) {
+            Save-AutoCheckUrls (@((Get-AutoCheckUrls) + [string]$ch.url))
+        }
+        return $true
+    }
+
+    $streamlinkCommand = Get-Command streamlink -ErrorAction SilentlyContinue
+    if (-not $streamlinkCommand) { throw "Streamlink not found. Install it and ensure it is on PATH." }
+    $streamlinkPath = if ($streamlinkCommand.Path) { [string]$streamlinkCommand.Path } else { [string]$streamlinkCommand.Source }
+
+    try {
+        if ($existingTask) {
+            if (-not (Disable-AutoCheck ([string]$ch.url))) {
+                throw "Could not safely replace stale Auto Check task $taskName."
+            }
+        } else {
+            $staleStatus = Read-AutoStatus ([string]$ch.url)
+            if (-not (Stop-StatusWorker $staleStatus) -or -not (Stop-StatusRecording $staleStatus)) {
+                throw "Could not safely stop stale Auto Check processes for $($ch.url)."
+            }
+            Remove-AutoCheckArtifacts $paths
+        }
+        New-AutoCheckWorker $ch $paths $streamlinkPath
+        if ($env:SHOWROOM_RECORDER_TEST -eq '1') {
+            Save-AutoCheckUrls (@((Get-AutoCheckUrls) + [string]$ch.url))
+            return $true
+        }
+
+        $workerArgument = Get-AutoCheckWorkerArgument $paths
+        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $workerArgument
+        $trigger = New-ScheduledTaskTrigger -AtLogOn
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -Hidden -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Description "Auto-check $($ch.name)" -Force | Out-Null
+        Start-ScheduledTask -TaskName $taskName
+
+        if (-not (Test-AutoCheckEnabled ([string]$ch.url))) {
+            Save-AutoCheckUrls (@((Get-AutoCheckUrls) + [string]$ch.url))
+        }
+        return $true
+    } catch {
+        $registrationError = $_
+        if (-not (Disable-AutoCheck ([string]$ch.url))) {
+            throw "Auto Check setup failed and shutdown could not be verified for $($ch.url): $registrationError"
+        }
+        throw $registrationError
+    }
+}
+
+function Disable-AutoCheck([string]$url, $expectedStatus = $null) {
+    if ([string]::IsNullOrWhiteSpace($url)) { return $false }
+
+    $paths = Get-AutoCheckPaths $url
+    $status = if ($null -ne $expectedStatus) { $expectedStatus } else { Read-AutoStatus $url }
+    if ($status -and ([string]$status.url -ne $url -or ([string]$status.workerPath -and [string]$status.workerPath -ne [string]$paths.worker))) {
+        return $false
+    }
+    try {
+        $task = Get-ScheduledTask -TaskName $paths.taskName -ErrorAction SilentlyContinue
+        if ($task) {
+            Stop-ScheduledTask -TaskName $paths.taskName -ErrorAction Stop
+            if (-not (Wait-ScheduledTaskStopped $paths.taskName)) { return $false }
+        }
+    } catch {
+        return $false
+    }
+
+    if (-not (Stop-StatusWorker $status)) { return $false }
+    if (-not (Stop-StatusRecording $status)) { return $false }
+    if ($task) {
+        try {
+            Unregister-ScheduledTask -TaskName $paths.taskName -Confirm:$false -ErrorAction Stop
+        } catch {
+            return $false
+        }
+    }
+    Remove-AutoCheckArtifacts $paths
+    Save-AutoCheckUrls @((Get-AutoCheckUrls) | Where-Object { $_ -ne $url })
+    return $true
+}
+
+function Reconcile-AutoChecks([switch]$RebuildWorkers) {
+    $channelsByUrl = @{}
+    foreach ($ch in $global:channels) { $channelsByUrl[[string]$ch.url] = $ch }
+
+    $enabledUrls = @(Get-AutoCheckUrls)
+    foreach ($url in $enabledUrls) {
+        try {
+            if (-not $channelsByUrl.ContainsKey([string]$url)) {
+                if (-not (Disable-AutoCheck ([string]$url))) {
+                    throw "Disable did not complete."
+                }
+            } else {
+                if ($RebuildWorkers) {
+                    if (-not (Disable-AutoCheck ([string]$url))) {
+                        throw "Could not stop the existing worker for rebuild."
+                    }
+                }
+                Enable-AutoCheck $channelsByUrl[[string]$url] | Out-Null
+            }
+        } catch {
+            Write-Host "Auto-check reconciliation failed for $url`: $_"
+        }
+    }
+
+    $enabledUrls = @(Get-AutoCheckUrls)
+    $managedIds = @($enabledUrls | ForEach-Object { Get-ChannelId ([string]$_) })
+    foreach ($task in @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like 'SHOWROOM_AUTO_*' })) {
+        $taskId = $task.TaskName.Substring('SHOWROOM_AUTO_'.Length)
+        if ($taskId -notmatch '^[0-9a-f]{16}$' -or $managedIds -notcontains $taskId) {
+            try {
+                $orphanPaths = [pscustomobject]@{ worker = Join-Path $autoJobsDir "auto-$taskId.ps1"; status = Join-Path $autoStatusDir "auto-$taskId.json"; log = Join-Path $autoLogsDir "auto-$taskId.log" }
+                $orphanStatus = if ($taskId -match '^[0-9a-f]{16}$' -and (Test-Path -LiteralPath $orphanPaths.status)) { Get-Content -LiteralPath $orphanPaths.status -Raw -Encoding UTF8 | ConvertFrom-Json } else { $null }
+                if ($orphanStatus -and $orphanStatus.url -and (Get-ChannelId ([string]$orphanStatus.url)) -eq $taskId) {
+                    if (-not (Disable-AutoCheck ([string]$orphanStatus.url))) { throw "Disable did not complete." }
+                    continue
+                }
+                Stop-ScheduledTask -TaskName $task.TaskName -ErrorAction Stop
+                if (-not (Wait-ScheduledTaskStopped $task.TaskName)) { throw "Task did not stop." }
+                Unregister-ScheduledTask -TaskName $task.TaskName -Confirm:$false -ErrorAction Stop
+                if ($taskId -match '^[0-9a-f]{16}$') { Remove-AutoCheckArtifacts $orphanPaths }
+            } catch {
+                Write-Host "Auto-check reconciliation failed for $($task.TaskName)`: $_"
+            }
+        }
+    }
+}
+
+function Refresh-ChannelList {
+    $channelList.Items.Clear()
+    $global:channelRows = @()
+    foreach ($ch in $global:channels) {
+        $global:channelRows += $ch
+        $isAutoChecked = Test-AutoCheckEnabled ([string]$ch.url)
+        $display = if ($isAutoChecked) { "📡  $($ch.name)" } else { [string]$ch.name }
+        $channelList.Items.Add($display) | Out-Null
+    }
 }
 
 function Start-Recording($ch) {
+    if (Test-AutoCheckEnabled ([string]$ch.url)) {
+        Set-Status "Already auto-checking: $($ch.name)" 'ok'
+        return $false
+    }
     $timestamp = Get-Date -Format "yyyy-MM-dd_HH_mm"
     $filename  = "$($ch.name)-SHOWROOM-$timestamp.mp4"
     $output    = Join-Path $saveBox.Text $filename
     try {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = "streamlink"
-        $psi.Arguments = "`"$($ch.url)`" best -o `"$output`" --force --retry-streams 30"
+        $psi.Arguments = Join-WindowsCommandLine @(
+            [string]$ch.url,
+            'best',
+            '-o',
+            $output,
+            '--force',
+            '--retry-streams',
+            '30'
+        )
         $psi.UseShellExecute = $false
-        [System.Diagnostics.Process]::Start($psi) | Out-Null
-        $recordingList.Items.Add($ch.name)
+        $process = [System.Diagnostics.Process]::Start($psi)
+        $display = "$($ch.name)  [PID $($process.Id)]"
+        $global:manualRecordings[[string]$process.Id] = [pscustomobject]@{
+            processId = $process.Id
+            process = $process
+            name = [string]$ch.name
+            url = [string]$ch.url
+            display = $display
+            kind = 'manual'
+        }
+        Refresh-RecordingList
         Set-Status "Recording: $($ch.name)" 'rec'
+        return $true
     } catch {
         Set-Status "Streamlink not found — install from streamlink.github.io" 'err'
         [System.Windows.Forms.MessageBox]::Show("Could not start streamlink. Is it installed and on your PATH?`n`n$($_.Exception.Message)", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        return $false
     }
+}
+
+function Stop-RecordingByProcessId([int]$processId) {
+    $entry = $global:manualRecordings[[string]$processId]
+    if (-not $entry) { return $false }
+    try {
+        if ($entry.process.HasExited) {
+            $global:manualRecordings.Remove([string]$processId)
+            return $false
+        }
+        if (-not $entry.process.HasExited) {
+            $entry.process.Kill()
+        }
+        if (-not (Wait-ProcessExit $entry.process)) { return $false }
+        $global:manualRecordings.Remove([string]$processId)
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Stop-RecordingEntry($entry) {
+    if (-not $entry) { return $false }
+    try {
+        if ($entry.kind -eq 'auto') {
+            return (Disable-AutoCheck ([string]$entry.url) $entry.status)
+        }
+        return (Stop-RecordingByProcessId ([int]$entry.processId))
+    } catch {
+        return $false
+    }
+}
+
+function Refresh-RecordingList {
+    $selectedDisplay = if ($recordingList.SelectedIndex -ge 0) { [string]$recordingList.SelectedItem } else { $null }
+    foreach ($key in @($global:manualRecordings.Keys)) {
+        $entry = $global:manualRecordings[$key]
+        if ($entry.process.HasExited) {
+            $global:manualRecordings.Remove($key)
+        }
+    }
+
+    $global:autoRecordings = @{}
+    foreach ($url in @(Get-AutoCheckUrls)) {
+        $status = Read-AutoStatus ([string]$url)
+        if (Test-StatusRecordingProcess $status) {
+            $processId = [string]$status.processId
+            $global:autoRecordings[$processId] = [pscustomobject]@{
+                processId = [int]$status.processId
+                name = [string]$status.name
+                url = [string]$status.url
+                display = "$(($status.name))  [PID $($status.processId)]"
+                kind = 'auto'
+                status = $status
+            }
+        }
+    }
+
+    $global:recordingRows = @($global:manualRecordings.Values) + @($global:autoRecordings.Values)
+    $recordingList.Items.Clear()
+    foreach ($entry in $global:recordingRows) {
+        $recordingList.Items.Add($entry.display) | Out-Null
+    }
+    if ($selectedDisplay) { $recordingList.SelectedItem = $selectedDisplay }
 }
 
 # ---------------------------------------------------------------- Data
 $global:channels = @()
+$global:manualRecordings = @{}
+$global:autoRecordings = @{}
+$global:channelRows = @()
+$global:recordingRows = @()
 
-$channelsFile = "$env:APPDATA\SHOWROOMRecorder\channels.json"
+$dataDir = Join-Path $env:APPDATA 'SHOWROOMRecorder'
+$channelsFile = Join-Path $dataDir 'channels.json'
+$settingsFile = Join-Path $dataDir 'settings.json'
+$autoCheckFile = Join-Path $dataDir "auto-check.json"
+$autoJobsDir = Join-Path $dataDir 'jobs'
+$autoStatusDir = Join-Path $dataDir 'status'
+$autoLogsDir = Join-Path $dataDir 'logs'
 if (Test-Path $channelsFile) {
     try {
         $savedChannels = Get-Content $channelsFile -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -86,7 +657,6 @@ if (Test-Path $channelsFile) {
     }
 }
 
-$settingsFile = "$env:APPDATA\SHOWROOMRecorder\settings.json"
 $defaultSavePath = "C:\Recordings"
 if (Test-Path $settingsFile) {
     try {
@@ -167,12 +737,14 @@ $saveBrowseBtn.Add_Click({
     $folderBrowser.SelectedPath = $saveBox.Text
     if ($folderBrowser.ShowDialog() -eq "OK") {
         $saveBox.Text = $folderBrowser.SelectedPath
-        $settingsFile = "$env:APPDATA\SHOWROOMRecorder\settings.json"
-        if (!(Test-Path (Split-Path $settingsFile -Parent))) {
-            New-Item -ItemType Directory -Path (Split-Path $settingsFile -Parent) -Force | Out-Null
-        }
+        Ensure-AutoDirectories
         $settings = @{savePath = $saveBox.Text} | ConvertTo-Json
         Set-Content $settingsFile $settings -Encoding UTF8
+        try {
+            Reconcile-AutoChecks -RebuildWorkers
+        } catch {
+            Write-Host "Auto-check reconciliation failed after changing save location: $_"
+        }
         Set-Status "Save location updated" 'ok'
     }
 })
@@ -222,13 +794,15 @@ Style-Btn $addBtn $clrAdd
 $addBtn.Add_Click({
     if ($urlBox.Text -and $nameBox.Text) {
         $global:channels += @{url = $urlBox.Text; name = $nameBox.Text}
-        $channelList.Items.Add("$($nameBox.Text)")
 
-        $channelsFile = "$env:APPDATA\SHOWROOMRecorder\channels.json"
-        if (!(Test-Path (Split-Path $channelsFile -Parent))) {
-            New-Item -ItemType Directory -Path (Split-Path $channelsFile -Parent) -Force | Out-Null
-        }
+        Ensure-AutoDirectories
         $global:channels | ConvertTo-Json -Depth 10 | Out-File -FilePath $channelsFile -Encoding UTF8
+        Refresh-ChannelList
+        try {
+            Reconcile-AutoChecks
+        } catch {
+            Write-Host "Auto-check reconciliation failed after adding a channel: $_"
+        }
 
         Set-Status "Added: $($nameBox.Text)" 'ok'
         $urlBox.Text = "https://www.showroom-live.com/r/"
@@ -257,7 +831,7 @@ $channelList.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
 $channelList.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
 $gChannels.Controls.Add($channelList)
 
-foreach ($ch in $global:channels) { $channelList.Items.Add($ch.name) }
+Refresh-ChannelList
 
 $recordSelectedBtn = New-Object System.Windows.Forms.Button
 $recordSelectedBtn.Location = New-Object System.Drawing.Point(14, 152)
@@ -280,8 +854,15 @@ $removeBtn.Text = "🗑  Delete"
 Style-Btn $removeBtn $clrDelete
 $gChannels.Controls.Add($removeBtn)
 
+$autoCheckBtn = New-Object System.Windows.Forms.Button
+$autoCheckBtn.Location = New-Object System.Drawing.Point(458, 152)
+$autoCheckBtn.Size = New-Object System.Drawing.Size(150, 36)
+$autoCheckBtn.Text = "📡  Auto Check"
+Style-Btn $autoCheckBtn $clrSchedule
+$gChannels.Controls.Add($autoCheckBtn)
+
 $hintLabel = New-Object System.Windows.Forms.Label
-$hintLabel.Location = New-Object System.Drawing.Point(466, 160)
+$hintLabel.Location = New-Object System.Drawing.Point(620, 160)
 $hintLabel.AutoSize = $true
 $hintLabel.Text = "Tip: double-click a channel to record it"
 $hintLabel.ForeColor = [System.Drawing.Color]::FromArgb(140, 145, 150)
@@ -364,17 +945,24 @@ $form.Controls.Add($gRecording)
 
 $recordingList = New-Object System.Windows.Forms.ListBox
 $recordingList.Location = New-Object System.Drawing.Point(14, 24)
-$recordingList.Size = New-Object System.Drawing.Size(280, 80)
+$recordingList.Size = New-Object System.Drawing.Size(220, 80)
 $recordingList.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
 $recordingList.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
 $gRecording.Controls.Add($recordingList)
 
 $stopBtn = New-Object System.Windows.Forms.Button
-$stopBtn.Location = New-Object System.Drawing.Point(302, 24)
-$stopBtn.Size = New-Object System.Drawing.Size(94, 80)
-$stopBtn.Text = "⏹`nStop"
+$stopBtn.Location = New-Object System.Drawing.Point(242, 24)
+$stopBtn.Size = New-Object System.Drawing.Size(74, 36)
+$stopBtn.Text = "⏹ Stop"
 Style-Btn $stopBtn $clrStop
 $gRecording.Controls.Add($stopBtn)
+
+$stopAllBtn = New-Object System.Windows.Forms.Button
+$stopAllBtn.Location = New-Object System.Drawing.Point(322, 24)
+$stopAllBtn.Size = New-Object System.Drawing.Size(74, 36)
+$stopAllBtn.Text = "Stop All"
+Style-Btn $stopAllBtn $clrDelete
+$gRecording.Controls.Add($stopAllBtn)
 
 # ---------------------------------------------------------------- Actions
 $recordSelectedBtn.Add_Click({
@@ -382,14 +970,41 @@ $recordSelectedBtn.Add_Click({
         [System.Windows.Forms.MessageBox]::Show("Please select a channel first", "Nothing selected", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
         return
     }
+    $recordedCount = 0
+    $failedStartCount = 0
+    $skippedAutoCheckCount = 0
     foreach ($idx in $channelList.SelectedIndices) {
-        Start-Recording $global:channels[$idx]
+        $ch = $global:channelRows[$idx]
+        if (Test-AutoCheckEnabled ([string]$ch.url)) {
+            $skippedAutoCheckCount++
+            continue
+        }
+        if (Start-Recording $ch) {
+            $recordedCount++
+        } else {
+            $failedStartCount++
+        }
+    }
+    if ($recordedCount -gt 0) {
+        $message = "Recording $recordedCount channel(s)"
+        if ($skippedAutoCheckCount -gt 0) { $message += "; skipped $skippedAutoCheckCount auto-checking" }
+        if ($failedStartCount -gt 0) {
+            Set-Status "$message; failed to start $failedStartCount" 'err'
+        } else {
+            Set-Status $message 'rec'
+        }
+    } elseif ($failedStartCount -gt 0) {
+        $message = "Could not start $failedStartCount selected channel(s)"
+        if ($skippedAutoCheckCount -gt 0) { $message += "; skipped $skippedAutoCheckCount auto-checking" }
+        Set-Status $message 'err'
+    } else {
+        Set-Status "Skipped $skippedAutoCheckCount auto-checking channel(s)" 'ok'
     }
 })
 
 $channelList.Add_DoubleClick({
     if ($channelList.SelectedIndex -ge 0) {
-        Start-Recording $global:channels[$channelList.SelectedIndex]
+        Start-Recording $global:channelRows[$channelList.SelectedIndex]
     }
 })
 
@@ -398,20 +1013,74 @@ $recordAllBtn.Add_Click({
         [System.Windows.Forms.MessageBox]::Show("No channels added", "Nothing to record", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
         return
     }
-    foreach ($ch in $global:channels) { Start-Recording $ch }
-    Set-Status "Recording all $($global:channels.Count) channels" 'rec'
+    $manualChannels = @($global:channels | Where-Object { -not (Test-AutoCheckEnabled ([string]$_.url)) })
+    $skippedAutoCheckCount = $global:channels.Count - $manualChannels.Count
+    $recordedCount = 0
+    $failedStartCount = 0
+    foreach ($ch in $manualChannels) {
+        if (Start-Recording $ch) {
+            $recordedCount++
+        } else {
+            $failedStartCount++
+        }
+    }
+    if ($recordedCount -gt 0) {
+        $message = "Recording all $recordedCount eligible channel(s)"
+        if ($skippedAutoCheckCount -gt 0) { $message += "; skipped $skippedAutoCheckCount auto-checking" }
+        if ($failedStartCount -gt 0) {
+            Set-Status "$message; failed to start $failedStartCount" 'err'
+        } else {
+            Set-Status $message 'rec'
+        }
+    } elseif ($failedStartCount -gt 0) {
+        $message = "Could not start $failedStartCount channel(s)"
+        if ($skippedAutoCheckCount -gt 0) { $message += "; skipped $skippedAutoCheckCount auto-checking" }
+        Set-Status $message 'err'
+    } else {
+        Set-Status "Skipped $skippedAutoCheckCount auto-checking channel(s)" 'ok'
+    }
 })
 
 $stopBtn.Add_Click({
-    if ($recordingList.SelectedIndex -ge 0) {
-        $selectedName = $recordingList.SelectedItem
-        Get-Process -Name streamlink -ErrorAction SilentlyContinue | Stop-Process -Force
-        $recordingList.Items.RemoveAt($recordingList.SelectedIndex)
-        Set-Status "Stopped: $selectedName" 'ok'
+    if ($recordingList.SelectedIndex -lt 0) {
+        [System.Windows.Forms.MessageBox]::Show("Please select a recording first", "Nothing selected", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        return
+    }
+
+    $selectedDisplay = [string]$recordingList.SelectedItem
+    $entry = $global:recordingRows[$recordingList.SelectedIndex]
+    $stopped = $false
+    try {
+        $stopped = Stop-RecordingEntry $entry
+    } catch {
+        $stopped = $false
+    }
+    if ($stopped) {
+        Refresh-RecordingList
+        Set-Status "Stopped: $($entry.name)" 'ok'
     } else {
-        Get-Process -Name streamlink -ErrorAction SilentlyContinue | Stop-Process -Force
-        $recordingList.Items.Clear()
+        Set-Status "Could not stop: $($entry.name)" 'err'
+    }
+})
+
+$stopAllBtn.Add_Click({
+    if ([System.Windows.Forms.MessageBox]::Show("Stop all tracked recordings?", "Stop All", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning) -ne [System.Windows.Forms.DialogResult]::Yes) {
+        return
+    }
+
+    $allStopped = $true
+    foreach ($entry in @($global:recordingRows)) {
+        try {
+            if (-not (Stop-RecordingEntry $entry)) { $allStopped = $false }
+        } catch {
+            $allStopped = $false
+        }
+    }
+    Refresh-RecordingList
+    if ($allStopped) {
         Set-Status "Stopped all recordings" 'ok'
+    } else {
+        Set-Status "Some recordings could not be stopped" 'err'
     }
 })
 
@@ -421,22 +1090,64 @@ $removeBtn.Add_Click({
         return
     }
     $selectedIndices = @($channelList.SelectedIndices)
-    [array]::Reverse($selectedIndices)
-
+    $failedIndices = @()
+    foreach ($idx in $selectedIndices) {
+        $ch = $global:channelRows[$idx]
+        if (Test-AutoCheckEnabled ([string]$ch.url) -and -not (Disable-AutoCheck ([string]$ch.url))) {
+            $failedIndices += $idx
+        }
+    }
     $newChannels = @()
-    for ($i = 0; $i -lt $global:channels.Count; $i++) {
-        if ($selectedIndices -notcontains $i) { $newChannels += $global:channels[$i] }
+    for ($i = 0; $i -lt $global:channelRows.Count; $i++) {
+        if ($selectedIndices -notcontains $i -or $failedIndices -contains $i) {
+            $newChannels += $global:channelRows[$i]
+        }
     }
     $global:channels = $newChannels
 
-    $channelList.Items.Clear()
-    foreach ($ch in $global:channels) { $channelList.Items.Add($ch.name) }
+    Refresh-ChannelList
 
-    $channelsFile = "$env:APPDATA\SHOWROOMRecorder\channels.json"
+    Ensure-AutoDirectories
     $global:channels | ConvertTo-Json -Depth 10 | Out-File -FilePath $channelsFile -Encoding UTF8
+    try {
+        Reconcile-AutoChecks
+    } catch {
+        Write-Host "Auto-check reconciliation failed after deleting channels: $_"
+    }
 
-    Set-Status "Channel(s) deleted" 'ok'
+    $deletedCount = $selectedIndices.Count - $failedIndices.Count
+    if ($failedIndices.Count -gt 0) {
+        Set-Status "Deleted $deletedCount channel(s); retained $($failedIndices.Count) because Auto Check could not stop" 'err'
+    } else {
+        Set-Status "Deleted $deletedCount channel(s)" 'ok'
+    }
     Update-ChannelHeader
+})
+
+$autoCheckBtn.Add_Click({
+    if ($channelList.SelectedIndices.Count -ne 1) {
+        [System.Windows.Forms.MessageBox]::Show("Select exactly one channel to enable or disable Auto Check", "Select one channel", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        return
+    }
+
+    $ch = $global:channelRows[$channelList.SelectedIndex]
+    try {
+        if (Test-AutoCheckEnabled ([string]$ch.url)) {
+            if (-not (Disable-AutoCheck ([string]$ch.url))) { throw "Could not disable Auto Check for $($ch.name)." }
+            Set-Status "Auto Check disabled: $($ch.name)" 'ok'
+        } else {
+            if (-not (Enable-AutoCheck $ch)) { throw "Could not enable Auto Check for $($ch.name)." }
+            Set-Status "Auto Check enabled: $($ch.name)" 'ok'
+        }
+    } catch {
+        Set-Status "Auto Check failed: $($ch.name)" 'err'
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Auto Check", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        return
+    }
+
+    Refresh-ChannelList
+    Update-ChannelHeader
+    Refresh-RecordingList
 })
 
 $scheduleBtn.Add_Click({
@@ -458,15 +1169,16 @@ $scheduleBtn.Add_Click({
         $scheduleTimeStr = $scheduleDateTime.ToString("yyyy-MM-dd HH:mm")
 
         foreach ($idx in $channelList.SelectedIndices) {
-            $ch = $global:channels[$idx]
+            $ch = $global:channelRows[$idx]
             $timestamp = (Get-Date).ToString("yyyy-MM-dd_HH_mm")
             $filename = "$($ch.name)-SHOWROOM-$timestamp.mp4"
             $outputPath = Join-Path $saveBox.Text $filename
 
             $taskName = "SHOWROOM_REC_$([System.Guid]::NewGuid().ToString('N').Substring(0,8))"
-            $cmd = "streamlink `"$($ch.url)`" best -o `"$outputPath`" --force"
-
-            $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c start /MIN $cmd"
+           $streamlinkCommand = Get-Command streamlink -ErrorAction Stop
+            $streamlinkPath = if ($streamlinkCommand.Path) { [string]$streamlinkCommand.Path } else { [string]$streamlinkCommand.Source }
+            $streamlinkArguments = Join-WindowsCommandLine @([string]$ch.url, 'best', '-o', [string]$outputPath, '--force')
+            $action = New-ScheduledTaskAction -Execute $streamlinkPath -Argument $streamlinkArguments
             $trigger = New-ScheduledTaskTrigger -Once -At $scheduleDateTime
             $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 
@@ -481,5 +1193,19 @@ $scheduleBtn.Add_Click({
     }
 })
 
+try {
+    Reconcile-AutoChecks
+} catch {
+    Write-Host "Auto-check startup reconciliation failed: $_"
+}
+
+Refresh-ChannelList
+
+$refreshTimer = New-Object System.Windows.Forms.Timer
+$refreshTimer.Interval = 5000
+$refreshTimer.Add_Tick({ Refresh-RecordingList })
+$refreshTimer.Start()
+
+Refresh-RecordingList
 Update-ChannelHeader
 $form.ShowDialog() | Out-Null

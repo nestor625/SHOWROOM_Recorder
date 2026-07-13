@@ -83,7 +83,42 @@ Streamlink係錄影既核心軟件，冇佢就錄唔到！
 
 ### 停止錄影：
 1. 喺 **📡 Now Recording** 度選擇要停既recording
-2. 按 **⏹ Stop** button（唔揀就會全部停）
+2. 按 **⏹ Stop** button，只會停止你選擇嗰一個recording
+3. **Stop All** 係獨立按鈕，要明確按下並確認，先會停止全部recording
+
+### Auto Check（背景監察）
+
+**Auto Check 預設關閉**。喺 channel list 揀 **一次一個 channel**，再按
+**📡 Auto Check** 開／關該 channel。開啟後會見到 **📡** 標記；每個 channel
+都有自己獨立既worker，所以多個已開啟既 channel 可以 **同時錄影**。
+
+關閉 GUI 後 Auto Check 仍然會繼續運作，並會喺下次登入時重新開始。worker 每隔
+**60 seconds** 檢查一次，所以 channel 開始直播後，最遲大約一分鐘先開始錄影。
+停止由 Auto Check 開始既錄影時，亦會 **停用該 channel** 既 Auto Check monitor。
+只有你明確想停止全部錄影時，先使用 **Stop All**。
+
+### Auto Check 設定、狀態、工作同紀錄檔
+
+Windows 既 channel、儲存位置同 Auto Check 設定喺以下位置：
+
+```
+%APPDATA%\SHOWROOMRecorder\channels.json
+%APPDATA%\SHOWROOMRecorder\settings.json
+%APPDATA%\SHOWROOMRecorder\auto-check.json
+```
+
+每個已啟用 channel 都會有一個 Windows Task Scheduler 工作，名稱格式係
+`SHOWROOM_AUTO_<id>`。產生既 worker、狀態檔同 log 喺以下位置：
+
+```
+%APPDATA%\SHOWROOMRecorder\jobs\auto-<id>.ps1
+%APPDATA%\SHOWROOMRecorder\status\auto-<id>.json
+%APPDATA%\SHOWROOMRecorder\logs\auto-<id>.log
+```
+
+channel 旁邊既 **📡** 標記同 **📡 Now Recording** 會顯示目前狀態。如果某個
+worker 出錯，先揀該 channel 按 **📡 Auto Check** 停用，然後打開相同 id 既
+`logs\auto-<id>.log` 檢查錯誤，再決定要唔要重新啟用。
 
 ---
 
@@ -102,6 +137,9 @@ Filename格式：
 2. 揀你想要既folder
 3. 得咗！
 
+Windows 檔名時間格式係 `yyyy-MM-dd_HH_mm`；Mac 係 `%Y-%m-%d_%H%M`。
+兩個平台既 timestamp 格式維持不同，唔需要相同。
+
 ---
 
 ## 💾 資料儲存位置
@@ -119,6 +157,11 @@ C:\Users\你的用户名\AppData\Roaming\SHOWROOMRecorder\channels.json
 ### 設定 (Save Location)
 ```
 %APPDATA%\SHOWROOMRecorder\settings.json
+```
+
+Auto Check 開關設定：
+```
+%APPDATA%\SHOWROOMRecorder\auto-check.json
 ```
 
 ---
@@ -143,6 +186,8 @@ C:\Users\你的用户名\AppData\Roaming\SHOWROOMRecorder\channels.json
 ### Q1: 點解錄唔到？
 - 確保Streamlink已經安裝
 - 確保channel係直播緊
+- 確保 `streamlink` 喺 `PATH` 入面。Auto Check 出錯時，先停用該 channel，
+  再檢查 `logs\auto-<id>.log`。
 
 ### Q2: 錄既時候可以熄機？
 ❌ 唔可以，要部電腦開著
@@ -152,6 +197,13 @@ C:\Users\你的用户名\AppData\Roaming\SHOWROOMRecorder\channels.json
 
 ### Q4: 有咩問題點算？
 可以去GitHub開Issue或者搵我地幫手
+
+### Windows 執行驗證範圍
+
+Windows PowerShell 5.1 同 WinForms 唔可以喺 macOS 執行，所以 Windows GUI 同
+scheduled worker 唔可以喺 Mac 做 runtime validation。要喺真正 Windows 電腦
+雙擊 `SHOWROOM Recorder.bat` 驗證；Mac 上既 source contracts 同 Bash syntax
+checks 唔代替 Windows runtime check。
 
 ---
 

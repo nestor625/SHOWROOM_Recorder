@@ -25,6 +25,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Live channel count in the Channels section header.
 - Color-coded status bar (recording / error / success).
 
+**Auto Check (Mac and Windows):** background monitoring is off by default, enabled per channel;
+workers persist after GUI closure and at next login, check every 60 seconds, and allow enabled
+channels to record simultaneously.
+
 **Docs:**
 - `AGENTS.md` and `CLAUDE.md` — contributor/agent guidance.
 
@@ -42,9 +46,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - **Mac:** Cancel actions and scheduling failures no longer crash the menu loop.
+- **Windows:** Selected **Stop** now stops only the selected recording; stopping an Auto
+  Check recording also disables that channel, while **Stop All** remains explicit and
+  confirmed.
 - **Windows:** `win/showroom-recorder.ps1` is now saved as **UTF-8 with BOM** so emoji and
   em-dashes render correctly under Windows PowerShell 5.1 (BOM-less files were read as the
   ANSI codepage → mojibake).
+
+Windows PowerShell/WinForms runtime behavior still requires validation on a real Windows
+machine; this changelog does not claim that validation was performed on macOS.
 
 ### Known differences
 
