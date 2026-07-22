@@ -804,11 +804,6 @@ $addBtn.Add_Click({
         Ensure-AutoDirectories
         $global:channels | ConvertTo-Json -Depth 10 | Out-File -FilePath $channelsFile -Encoding UTF8
         Refresh-ChannelList
-        try {
-            Reconcile-AutoChecks
-        } catch {
-            Write-Host "Auto-check reconciliation failed after adding a channel: $_"
-        }
 
         Set-Status "Added: $($nameBox.Text)" 'ok'
         $urlBox.Text = "https://www.showroom-live.com/r/"
