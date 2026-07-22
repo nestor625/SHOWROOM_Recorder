@@ -178,10 +178,10 @@ windows_ui_contract() {
     printf 'Save-location changes must reconcile Auto Check tasks\n' >&2
     return 1
   }
-  printf '%s\n' "$add_handler" | grep -Fq 'Reconcile-AutoChecks' || {
-    printf 'Added channels must reconcile Auto Check tasks\n' >&2
+  if printf '%s\n' "$add_handler" | grep -Fqi 'AutoCheck'; then
+    printf 'Adding a channel must not mutate existing Auto Check state\n' >&2
     return 1
-  }
+  fi
   printf '%s\n' "$stop_handler" | grep -Fq 'Stop-RecordingEntry $entry' || {
     printf 'selected Stop must use the Auto Check-aware stop path\n' >&2
     return 1
