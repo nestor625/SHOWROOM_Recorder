@@ -461,19 +461,28 @@ function Disable-AutoCheck([string]$url, $expectedStatus = $null) {
         $task = Get-ScheduledTask -TaskName $paths.taskName -ErrorAction SilentlyContinue
         if ($task) {
             Stop-ScheduledTask -TaskName $paths.taskName -ErrorAction Stop
-            if (-not (Wait-ScheduledTaskStopped $paths.taskName)) { return $false }
+            if (-not (Wait-ScheduledTaskStopped $paths.taskName)) {
+                Write-Host "Auto-check task did not stop immediately for $url; continuing best-effort cleanup."
+            }
         }
     } catch {
-        return $false
+        Write-Host "Unable to stop auto-check task for $url during disable: $_"
     }
 
-    if (-not (Stop-StatusWorker $status)) { return $false }
-    if (-not (Stop-StatusRecording $status)) { return $false }
+    if ($status -and -not (Stop-StatusWorker $status)) {
+        Write-Host "Unable to stop worker process during auto-check disable for $url."
+    }
+    if ($status -and -not (Stop-StatusRecording $status)) {
+        Write-Host "Unable to stop recording process during auto-check disable for $url."
+    }
     if ($task) {
         try {
             Unregister-ScheduledTask -TaskName $paths.taskName -Confirm:$false -ErrorAction Stop
         } catch {
-            return $false
+            $currentTask = Get-ScheduledTask -TaskName $paths.taskName -ErrorAction SilentlyContinue
+            if ($currentTask -and $currentTask.State -eq 'Running') {
+                Write-Host "Auto-check task still running for $url; auto-check markers were cleared anyway."
+            }
         }
     }
     Remove-AutoCheckArtifacts $paths
