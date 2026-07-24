@@ -125,6 +125,15 @@ function Save-AutoCheckUrls([string[]]$urls) {
     }
 }
 
+function Add-AutoCheckUrl([string]$url) {
+    if ([string]::IsNullOrWhiteSpace($url)) { return }
+
+    $enabledUrls = @(Get-AutoCheckUrls)
+    if ($enabledUrls -notcontains $url) {
+        Save-AutoCheckUrls @($enabledUrls + $url)
+    }
+}
+
 function Test-AutoCheckEnabled([string]$url) {
     return (Get-AutoCheckUrls) -contains $url
 }
@@ -391,7 +400,7 @@ function Enable-AutoCheck($ch) {
     $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if ($existingTask -and (Test-AutoCheckTaskHealthy $existingTask $paths)) {
         if (-not (Test-AutoCheckEnabled ([string]$ch.url))) {
-            Save-AutoCheckUrls (@((Get-AutoCheckUrls) + [string]$ch.url))
+            Add-AutoCheckUrl ([string]$ch.url)
         }
         return $true
     }
@@ -414,7 +423,7 @@ function Enable-AutoCheck($ch) {
         }
         New-AutoCheckWorker $ch $paths $streamlinkPath
         if ($env:SHOWROOM_RECORDER_TEST -eq '1') {
-            Save-AutoCheckUrls (@((Get-AutoCheckUrls) + [string]$ch.url))
+            Add-AutoCheckUrl ([string]$ch.url)
             return $true
         }
 
@@ -427,7 +436,7 @@ function Enable-AutoCheck($ch) {
         Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
 
         if (-not (Test-AutoCheckEnabled ([string]$ch.url))) {
-            Save-AutoCheckUrls (@((Get-AutoCheckUrls) + [string]$ch.url))
+            Add-AutoCheckUrl ([string]$ch.url)
         }
         return $true
     } catch {
@@ -526,6 +535,29 @@ function Refresh-ChannelList {
         $isAutoChecked = Test-AutoCheckEnabled ([string]$ch.url)
         $display = if ($isAutoChecked) { "📡  $($ch.name)" } else { [string]$ch.name }
         $channelList.Items.Add($display) | Out-Null
+    }
+    Refresh-AutoCheckList
+}
+
+function Refresh-AutoCheckList {
+    if (-not $autoCheckList) { return }
+
+    $selectedUrl = if ($autoCheckList.SelectedIndex -ge 0) { [string]$global:autoCheckRows[$autoCheckList.SelectedIndex].url } else { $null }
+    $autoCheckList.Items.Clear()
+    $global:autoCheckRows = @()
+    foreach ($ch in $global:channels) {
+        if (Test-AutoCheckEnabled ([string]$ch.url)) {
+            $global:autoCheckRows += $ch
+            $autoCheckList.Items.Add("📡  $($ch.name)") | Out-Null
+        }
+    }
+    if ($selectedUrl) {
+        for ($index = 0; $index -lt $global:autoCheckRows.Count; $index++) {
+            if ([string]$global:autoCheckRows[$index].url -eq $selectedUrl) {
+                $autoCheckList.SelectedIndex = $index
+                break
+            }
+        }
     }
 }
 
@@ -639,6 +671,7 @@ $global:channels = @()
 $global:manualRecordings = @{}
 $global:autoRecordings = @{}
 $global:channelRows = @()
+$global:autoCheckRows = @()
 $global:recordingRows = @()
 
 $dataDir = Join-Path $env:APPDATA 'SHOWROOMRecorder'
@@ -826,11 +859,26 @@ $form.Controls.Add($gChannels)
 
 $channelList = New-Object System.Windows.Forms.ListBox
 $channelList.Location = New-Object System.Drawing.Point(14, 24)
-$channelList.Size = New-Object System.Drawing.Size(804, 118)
+$channelList.Size = New-Object System.Drawing.Size(496, 118)
 $channelList.SelectionMode = "MultiExtended"
 $channelList.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
 $channelList.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
 $gChannels.Controls.Add($channelList)
+
+$autoCheckListLabel = New-Object System.Windows.Forms.Label
+$autoCheckListLabel.Location = New-Object System.Drawing.Point(520, 24)
+$autoCheckListLabel.Size = New-Object System.Drawing.Size(298, 18)
+$autoCheckListLabel.Text = "Auto Check Enabled"
+$autoCheckListLabel.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Bold)
+$gChannels.Controls.Add($autoCheckListLabel)
+
+$autoCheckList = New-Object System.Windows.Forms.ListBox
+$autoCheckList.Location = New-Object System.Drawing.Point(520, 44)
+$autoCheckList.Size = New-Object System.Drawing.Size(298, 98)
+$autoCheckList.SelectionMode = "One"
+$autoCheckList.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+$autoCheckList.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+$gChannels.Controls.Add($autoCheckList)
 
 Refresh-ChannelList
 
@@ -862,13 +910,12 @@ $autoCheckBtn.Text = "📡  Auto Check"
 Style-Btn $autoCheckBtn $clrSchedule
 $gChannels.Controls.Add($autoCheckBtn)
 
-$hintLabel = New-Object System.Windows.Forms.Label
-$hintLabel.Location = New-Object System.Drawing.Point(620, 160)
-$hintLabel.AutoSize = $true
-$hintLabel.Text = "Tip: double-click a channel to record it"
-$hintLabel.ForeColor = [System.Drawing.Color]::FromArgb(140, 145, 150)
-$hintLabel.Font = New-Object System.Drawing.Font("Segoe UI", 8.5, [System.Drawing.FontStyle]::Italic)
-$gChannels.Controls.Add($hintLabel)
+$disableAutoCheckBtn = New-Object System.Windows.Forms.Button
+$disableAutoCheckBtn.Location = New-Object System.Drawing.Point(616, 152)
+$disableAutoCheckBtn.Size = New-Object System.Drawing.Size(202, 36)
+$disableAutoCheckBtn.Text = "Disable Selected"
+Style-Btn $disableAutoCheckBtn $clrDelete
+$gChannels.Controls.Add($disableAutoCheckBtn)
 
 # ---------------------------------------------------------------- Schedule
 $gSchedule = New-Object System.Windows.Forms.GroupBox
@@ -1140,6 +1187,27 @@ $autoCheckBtn.Add_Click({
             if (-not (Enable-AutoCheck $ch)) { throw "Could not enable Auto Check for $($ch.name)." }
             Set-Status "Auto Check enabled: $($ch.name)" 'ok'
         }
+    } catch {
+        Set-Status "Auto Check failed: $($ch.name)" 'err'
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Auto Check", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        return
+    }
+
+    Refresh-ChannelList
+    Update-ChannelHeader
+    Refresh-RecordingList
+})
+
+$disableAutoCheckBtn.Add_Click({
+    if ($autoCheckList.SelectedIndices.Count -ne 1) {
+        [System.Windows.Forms.MessageBox]::Show("Select one enabled channel to disable Auto Check", "Select one channel", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        return
+    }
+
+    $ch = $global:autoCheckRows[$autoCheckList.SelectedIndex]
+    try {
+        if (-not (Disable-AutoCheck ([string]$ch.url))) { throw "Could not disable Auto Check for $($ch.name)." }
+        Set-Status "Auto Check disabled: $($ch.name)" 'ok'
     } catch {
         Set-Status "Auto Check failed: $($ch.name)" 'err'
         [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Auto Check", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null

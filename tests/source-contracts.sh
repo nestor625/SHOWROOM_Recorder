@@ -85,12 +85,18 @@ windows_auto_contract() {
 }
 
 windows_ui_contract() {
-  local auto_handler selected_handler all_handler delete_handler save_handler add_handler stop_handler
+  local auto_handler selected_handler all_handler delete_handler save_handler add_handler stop_handler disable_auto_handler refresh_channels
 
   require_literal "$win" '$autoCheckBtn.Location = New-Object System.Drawing.Point(458, 152)'
   require_literal "$win" '$autoCheckBtn.Size = New-Object System.Drawing.Size(150, 36)'
   require_literal "$win" 'Style-Btn $autoCheckBtn $clrSchedule'
   require_literal "$win" '$gChannels.Controls.Add($autoCheckBtn)'
+  require_literal "$win" '$global:autoCheckRows = @()'
+  require_literal "$win" 'function Refresh-AutoCheckList'
+  require_literal "$win" '$autoCheckList = New-Object System.Windows.Forms.ListBox'
+  require_literal "$win" '$disableAutoCheckBtn.Text = "Disable Selected"'
+  require_literal "$win" '$gChannels.Controls.Add($autoCheckList)'
+  require_literal "$win" '$gChannels.Controls.Add($disableAutoCheckBtn)'
   require_literal "$win" '$display = if ($isAutoChecked) { "📡  $($ch.name)" } else { [string]$ch.name }'
   require_literal "$win" '$channelList.Items.Add($display) | Out-Null'
   require_literal "$win" '$autoCheckCount = @(Get-AutoCheckUrls).Count'
@@ -131,6 +137,16 @@ windows_ui_contract() {
     in_handler { print }
     in_handler && /^\}\)$/ { exit }
   ' "$win")
+  disable_auto_handler=$(awk '
+    /^\$disableAutoCheckBtn\.Add_Click\(\{/ { in_handler = 1 }
+    in_handler { print }
+    in_handler && /^\}\)$/ { exit }
+  ' "$win")
+  refresh_channels=$(awk '
+    /^function Refresh-ChannelList/ { in_handler = 1 }
+    in_handler { print }
+    in_handler && /^}$/ { exit }
+  ' "$win")
 
   printf '%s\n' "$auto_handler" | grep -Fq '$channelList.SelectedIndices.Count -ne 1' || {
     printf 'Auto Check must require exactly one selected channel\n' >&2
@@ -146,6 +162,22 @@ windows_ui_contract() {
   }
   printf '%s\n' "$auto_handler" | grep -Fq 'Enable-AutoCheck $ch' || {
     printf 'Auto Check must enable the selected channel entry\n' >&2
+    return 1
+  }
+  printf '%s\n' "$disable_auto_handler" | grep -Fq '$autoCheckList.SelectedIndices.Count -ne 1' || {
+    printf 'Auto Check list must require exactly one selected channel\n' >&2
+    return 1
+  }
+  printf '%s\n' "$disable_auto_handler" | grep -Fq '$ch = $global:autoCheckRows[$autoCheckList.SelectedIndex]' || {
+    printf 'Auto Check list must map the selected row back to its channel entry\n' >&2
+    return 1
+  }
+  printf '%s\n' "$disable_auto_handler" | grep -Fq 'Disable-AutoCheck ([string]$ch.url)' || {
+    printf 'Auto Check list must disable the selected channel by URL\n' >&2
+    return 1
+  }
+  printf '%s\n' "$refresh_channels" | grep -Fq 'Refresh-AutoCheckList' || {
+    printf 'Channel refresh must also refresh the enabled Auto Check list\n' >&2
     return 1
   }
 
@@ -184,6 +216,26 @@ windows_ui_contract() {
   fi
   printf '%s\n' "$stop_handler" | grep -Fq 'Stop-RecordingEntry $entry' || {
     printf 'selected Stop must use the Auto Check-aware stop path\n' >&2
+    return 1
+  }
+}
+
+windows_auto_check_append_contract() {
+  local enable helper_calls
+
+  require_literal "$win" 'function Add-AutoCheckUrl([string]$url)'
+  require_literal "$win" '$enabledUrls = @(Get-AutoCheckUrls)'
+  require_literal "$win" 'Save-AutoCheckUrls @($enabledUrls + $url)'
+  reject_literal "$win" 'Save-AutoCheckUrls (@((Get-AutoCheckUrls) + [string]$ch.url))'
+
+  enable=$(awk '
+    /^function Enable-AutoCheck/ { in_handler = 1 }
+    in_handler { print }
+    in_handler && /^}$/ { exit }
+  ' "$win")
+  helper_calls=$(printf '%s\n' "$enable" | grep -Fc 'Add-AutoCheckUrl ([string]$ch.url)')
+  [ "$helper_calls" -eq 3 ] || {
+    printf 'Enable-AutoCheck must use array-safe persistence for every successful enable path\n' >&2
     return 1
   }
 }
@@ -1084,6 +1136,7 @@ selected_stop_orders_selection_before_refresh() {
 case "${1:-all}" in
   windows-stop) windows_stop_contract ;;
   windows-auto) windows_auto_contract ;;
+  windows-auto-append) windows_auto_check_append_contract ;;
   windows-ui) windows_ui_contract ;;
   windows-review-fixes) windows_task_3b_review_fixes_contract ;;
   mac-auto) mac_auto_contract ;;
@@ -1091,6 +1144,6 @@ case "${1:-all}" in
   mac-artifacts) managed_artifact_contract ;;
   mac-stop) stop_recording_lifecycle_contract ;;
   mac-count) recording_count_contract ;;
-  all) windows_stop_contract; windows_auto_contract; windows_ui_contract; windows_task_3b_review_fixes_contract; mac_auto_contract; mac_channel_storage_contract; windows_channel_storage_contract; documentation_contract ;;
+  all) windows_stop_contract; windows_auto_contract; windows_auto_check_append_contract; windows_ui_contract; windows_task_3b_review_fixes_contract; mac_auto_contract; mac_channel_storage_contract; windows_channel_storage_contract; documentation_contract ;;
   *) printf 'unknown contract: %s\n' "$1" >&2; exit 2 ;;
 esac
