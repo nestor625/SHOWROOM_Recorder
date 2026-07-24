@@ -454,7 +454,8 @@ function Disable-AutoCheck([string]$url, $expectedStatus = $null) {
     $paths = Get-AutoCheckPaths $url
     $status = if ($null -ne $expectedStatus) { $expectedStatus } else { Read-AutoStatus $url }
     if ($status -and ([string]$status.url -ne $url -or ([string]$status.workerPath -and [string]$status.workerPath -ne [string]$paths.worker))) {
-        return $false
+        Write-Host "Auto-check status mismatch for $url (expected URL/path does not match). Cleaning up task and artifacts directly."
+        $status = $null
     }
     try {
         $task = Get-ScheduledTask -TaskName $paths.taskName -ErrorAction SilentlyContinue
