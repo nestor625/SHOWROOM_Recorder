@@ -18,7 +18,10 @@
 
 ```bash
 brew install streamlink
+brew upgrade streamlink
 ```
+
+SHOWROOM Recorder 需要 **Streamlink 8.6.2 或更新**。8.6.1 同更舊版本有機會被惡意清單讀取本機檔案，App 會拒絕錄影。用 `streamlink --version` 確認。如果之前開咗 Auto Check，升級後要再手動開啟。
 
 ### 3. 下載SHOWROOM Recorder
 1. 去GitHub：https://github.com/nestor625/SHOWROOM_Recorder
@@ -129,7 +132,7 @@ Mac 檔名時間格式係 `%Y-%m-%d_%H%M`；Windows 係 `yyyy-MM-dd_HH_mm`。
 ## ❓ 常見問題
 
 ### Q1: 點解錄唔到？
-- 確保Streamlink已經install成功 (`brew install streamlink`)
+- 確保 Streamlink **8.6.2 或更新** 已經 install (`brew upgrade streamlink`，再用 `streamlink --version` 確認)
 - 確保 `streamlink` 喺 `PATH` 入面。Auto Check 出錯時，先停用該 channel，
   再檢查 `~/.showroom_data/logs/auto-<id>.log`。
 

@@ -26,9 +26,11 @@ usually needs a mirrored change to the other, plus the relevant tutorial(s).
 
 ## Runtime dependency
 
-`streamlink` must be on `PATH`. Mac installs via `brew install streamlink`; Windows via
-the official installer. Recording code should fail *gracefully* when it's missing (show a
-message, don't crash the UI).
+`streamlink` **8.6.2 or newer** must be on `PATH`. Mac installs via `brew install streamlink`
+(upgrade with `brew upgrade streamlink`); Windows via the official installer. Recording
+code should fail *gracefully* when it's missing or older than 8.6.2 (show a message,
+don't crash the UI). 8.6.1 and older are blocked because a playlist can make them read
+local files (`GHSA-j7pf-m7gx-jr33`, `CVE-2026-44353`, `CVE-2026-92164`).
 
 ## Conventions & invariants — read before editing
 

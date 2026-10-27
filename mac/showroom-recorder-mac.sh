@@ -15,6 +15,15 @@ if ! command -v streamlink &> /dev/null; then
     exit 1
 fi
 
+min_streamlink=8.6.2
+streamlink_version=$(streamlink --version 2>/dev/null | awk 'NR==1 { print $2; exit }')
+if ! { printf '%s' "$streamlink_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' && awk -v v="$streamlink_version" -v m="$min_streamlink" 'BEGIN { n = split(v, a, "."); split(m, b, "."); for (i = 1; i <= 3; i++) { av = (i <= n ? a[i] + 0 : 0); bv = b[i] + 0; if (av < bv) exit 1; if (av > bv) exit 0 } exit 0 }'; }; then
+    echo "Streamlink 8.6.2 or newer is required (installed: ${streamlink_version:-unknown})."
+    echo "Streamlink 8.6.1 and older can be tricked into reading local files (GHSA-j7pf-m7gx-jr33)."
+    echo "Upgrade with: brew upgrade streamlink"
+    exit 1
+fi
+
 record_channel() {
     local url=$1
     local name=$2

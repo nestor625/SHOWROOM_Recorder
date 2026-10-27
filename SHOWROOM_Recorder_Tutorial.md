@@ -12,7 +12,9 @@ This app helps you record Japanese idol live streams from SHOWROOM!
 2. Click **Windows Installer**
 3. Follow the installation wizard
 
-Streamlink is required for recording!
+Streamlink is required for recording.
+
+SHOWROOM Recorder requires **Streamlink 8.6.2 or newer**. Version 8.6.1 and older can be tricked into reading local files, so the app will not record until you upgrade. Reinstall the current Windows installer from https://streamlink.github.io/ and confirm with `streamlink --version`. If Auto Check was already on, turn it on again after upgrading.
 
 ### Download SHOWROOM Recorder
 1. Go to GitHub: https://github.com/nestor625/SHOWROOM_Recorder
@@ -148,7 +150,7 @@ It will automatically start recording at the set time!
 ## FAQ
 
 ### Q1: Why can't I record?
-- Make sure Streamlink is installed
+- Make sure Streamlink **8.6.2 or newer** is installed (`streamlink --version`)
 - Make sure the channel is live
 - Confirm `streamlink` is available on `PATH`. If Auto Check is failing, disable that
   channel, inspect its `logs\auto-<id>.log` file, and try again.
