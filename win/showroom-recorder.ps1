@@ -270,6 +270,8 @@ function Test-AutoCheckTaskHealthy($task, $paths) {
     if ($actions.Count -ne 1) { return $false }
     if ([System.IO.Path]::GetFileName([string]$actions[0].Execute) -ine 'powershell.exe') { return $false }
     if ([string]$actions[0].Arguments -ne (Get-AutoCheckWorkerArgument $paths)) { return $false }
+    $workerSource = Get-Content -LiteralPath $paths.worker -Raw -ErrorAction SilentlyContinue
+    if ($workerSource -notlike "*MinimumStreamlinkVersion = '8.6.2'*") { return $false }
     $status = Read-AutoStatus ([string]$paths.url)
     return (Test-StatusWorkerProcess $status $paths)
 }
@@ -338,8 +340,29 @@ function Write-AutoWorkerLog([string]$message) {
     }
 }
 
+function Test-WorkerStreamlinkVersion([string]$path) {
+    $MinimumStreamlinkVersion = '8.6.2'
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $path
+    $psi.Arguments = '--version'
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    $process = [System.Diagnostics.Process]::Start($psi)
+    $output = $process.StandardOutput.ReadToEnd() + $process.StandardError.ReadToEnd()
+    $null = $process.WaitForExit(15000)
+    if ($output -notmatch '(?i)streamlink\s+([0-9]+)\.([0-9]+)\.([0-9]+)') { return $false }
+    $found = [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])"
+    return $found -ge [version]$MinimumStreamlinkVersion
+}
+
 New-Item -ItemType Directory -Path $savePath -Force | Out-Null
 $workerProcess = [System.Diagnostics.Process]::GetCurrentProcess()
+if (-not (Test-WorkerStreamlinkVersion $streamlink)) {
+    Write-AutoWorkerLog "Streamlink 8.6.2 or newer is required. Older releases can read local files (GHSA-j7pf-m7gx-jr33)."
+    exit 1
+}
 while ($true) {
     try {
         Write-AutoWorkerStatus ([ordered]@{ url = $url; name = $name; state = 'waiting'; output = $null; processId = $null; streamStartUtc = $null; workerProcessId = $workerProcess.Id; workerStartUtc = $workerProcess.StartTime.ToUniversalTime().ToString("o"); workerPath = $workerPath; lastError = $null })
@@ -391,6 +414,48 @@ function Remove-AutoCheckArtifacts($paths) {
     }
 }
 
+$script:minimumStreamlinkVersion = [version]'8.6.2'
+$script:installedStreamlinkVersion = $null
+
+function Get-StreamlinkCommandPath {
+    $command = Get-Command streamlink -ErrorAction SilentlyContinue
+    if (-not $command) { return $null }
+    if ($command.Path) { return [string]$command.Path }
+    return [string]$command.Source
+}
+
+function Get-InstalledStreamlinkVersion([string]$streamlinkPath) {
+    if ([string]::IsNullOrWhiteSpace($streamlinkPath)) { return $null }
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $streamlinkPath
+        $psi.Arguments = '--version'
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+        $process = [System.Diagnostics.Process]::Start($psi)
+        $output = $process.StandardOutput.ReadToEnd() + $process.StandardError.ReadToEnd()
+        $null = $process.WaitForExit(15000)
+        if ($output -match '(?i)streamlink\s+([0-9]+)\.([0-9]+)\.([0-9]+)') {
+            return [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])"
+        }
+    } catch {
+        return $null
+    }
+    return $null
+}
+
+function Test-MinimumStreamlinkVersion([string]$streamlinkPath) {
+    $script:installedStreamlinkVersion = Get-InstalledStreamlinkVersion $streamlinkPath
+    return ($null -ne $script:installedStreamlinkVersion -and $script:installedStreamlinkVersion -ge $script:minimumStreamlinkVersion)
+}
+
+function Get-StreamlinkUpdateMessage {
+    $installedText = if ($script:installedStreamlinkVersion) { [string]$script:installedStreamlinkVersion } else { 'unknown' }
+    return "SHOWROOM Recorder needs Streamlink 8.6.2 or newer before it will record.`n`nInstalled version: $installedText`n`nStreamlink 8.6.1 and older can be tricked into reading local files (GHSA-j7pf-m7gx-jr33, CVE-2026-44353, CVE-2026-92164). If Auto Check was enabled, it has been turned off. Reinstall the current Windows build from https://streamlink.github.io/ and confirm with streamlink --version, then turn Auto Check on again."
+}
+
 function Enable-AutoCheck($ch) {
     if (-not $ch -or [string]::IsNullOrWhiteSpace([string]$ch.url) -or [string]::IsNullOrWhiteSpace([string]$ch.name)) { return $false }
 
@@ -398,6 +463,16 @@ function Enable-AutoCheck($ch) {
     $paths = Get-AutoCheckPaths ([string]$ch.url)
     $taskName = $paths.taskName
     $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    $streamlinkCommand = Get-Command streamlink -ErrorAction SilentlyContinue
+    if ($streamlinkCommand) {
+        $streamlinkPath = if ($streamlinkCommand.Path) { [string]$streamlinkCommand.Path } else { [string]$streamlinkCommand.Source }
+        if (-not (Test-MinimumStreamlinkVersion $streamlinkPath)) {
+            if ($existingTask -and -not (Disable-AutoCheck ([string]$ch.url))) {
+                throw "Streamlink 8.6.2 or newer is required, and the existing Auto Check task could not be stopped."
+            }
+            throw (Get-StreamlinkUpdateMessage)
+        }
+    }
     if ($existingTask -and (Test-AutoCheckTaskHealthy $existingTask $paths)) {
         if (-not (Test-AutoCheckEnabled ([string]$ch.url))) {
             Add-AutoCheckUrl ([string]$ch.url)
@@ -405,7 +480,6 @@ function Enable-AutoCheck($ch) {
         return $true
     }
 
-    $streamlinkCommand = Get-Command streamlink -ErrorAction SilentlyContinue
     if (-not $streamlinkCommand) { throw "Streamlink not found. Install it and ensure it is on PATH." }
     $streamlinkPath = if ($streamlinkCommand.Path) { [string]$streamlinkCommand.Path } else { [string]$streamlinkCommand.Source }
 
@@ -575,6 +649,15 @@ function Start-Recording($ch) {
     if (Test-AutoCheckEnabled ([string]$ch.url)) {
         Set-Status "Already auto-checking: $($ch.name)" 'ok'
         return $false
+    }
+    $streamlinkCommand = Get-Command streamlink -ErrorAction SilentlyContinue
+    if ($streamlinkCommand) {
+        $streamlinkPath = if ($streamlinkCommand.Path) { [string]$streamlinkCommand.Path } else { [string]$streamlinkCommand.Source }
+        if (-not (Test-MinimumStreamlinkVersion $streamlinkPath)) {
+            Set-Status "Streamlink 8.6.2 or newer is required" 'err'
+            [System.Windows.Forms.MessageBox]::Show((Get-StreamlinkUpdateMessage), "Streamlink update required", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+            return $false
+        }
     }
     $timestamp = Get-Date -Format "yyyy-MM-dd_HH_mm"
     $filename  = "$($ch.name)-SHOWROOM-$timestamp.mp4"
@@ -1256,6 +1339,7 @@ $scheduleBtn.Add_Click({
             $taskName = "SHOWROOM_REC_$([System.Guid]::NewGuid().ToString('N').Substring(0,8))"
            $streamlinkCommand = Get-Command streamlink -ErrorAction Stop
             $streamlinkPath = if ($streamlinkCommand.Path) { [string]$streamlinkCommand.Path } else { [string]$streamlinkCommand.Source }
+            if (-not (Test-MinimumStreamlinkVersion $streamlinkPath)) { throw (Get-StreamlinkUpdateMessage) }
             $streamlinkArguments = Join-WindowsCommandLine @([string]$ch.url, 'best', '-o', [string]$outputPath, '--force')
             $action = New-ScheduledTaskAction -Execute $streamlinkPath -Argument $streamlinkArguments
             $trigger = New-ScheduledTaskTrigger -Once -At $scheduleDateTime
@@ -1277,6 +1361,11 @@ try {
     Reconcile-AutoChecks
 } catch {
     Write-Host "Auto-check startup reconciliation failed: $_"
+}
+
+$startupStreamlink = Get-StreamlinkCommandPath
+if ($startupStreamlink -and -not (Test-MinimumStreamlinkVersion $startupStreamlink)) {
+    [System.Windows.Forms.MessageBox]::Show((Get-StreamlinkUpdateMessage), "Streamlink update required", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
 }
 
 Refresh-ChannelList

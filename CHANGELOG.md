@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **Streamlink 8.6.2 is now the minimum** on Mac and Windows. Streamlink 8.6.1 and older
+  are refused before a recording, schedule, or Auto Check worker starts. Those releases
+  can be tricked into reading local files (`GHSA-j7pf-m7gx-jr33`, patched in 8.6.2;
+  `CVE-2026-92164`, patched in 8.6.0; `CVE-2026-44353`, patched in 8.4.0).
+- Opening the app with an older Streamlink turns existing Auto Check workers off. Upgrade
+  Streamlink, reopen the app, then enable Auto Check again. One-shot schedules created
+  earlier still call whatever `streamlink` is on disk, so upgrading the Streamlink install
+  in place covers them.
+
 ### Added
 
 **Mac app** (`mac/showroom-recorder-mac-gui.scpt`, v3.0) — feature parity with Windows:

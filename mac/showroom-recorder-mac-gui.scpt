@@ -27,6 +27,17 @@ on error
 	return
 end try
 
+if my streamlinkIsCurrent() is false then
+	try
+		set outdatedAutoURLs to my readAutoURLs()
+		repeat with outdatedURL in outdatedAutoURLs
+			my disableAutoCheck(contents of outdatedURL, "")
+		end repeat
+	end try
+	display dialog "❌  Streamlink is out of date." & return & return & "SHOWROOM Recorder needs Streamlink 8.6.2 or newer." & return & "The installed copy is older, or its version could not be read." & return & return & "Streamlink 8.6.1 and older can be tricked into reading local files (GHSA-j7pf-m7gx-jr33). If Auto Check was on, it has been turned off. Upgrade, reopen this app, then enable Auto Check again." & return & return & "Upgrade with:" & return & "    brew upgrade streamlink" buttons {"Quit"} default button "Quit" with icon stop with title "SHOWROOM Recorder"
+	return
+end if
+
 do shell script "mkdir -p " & quoted form of (homePath & "/Recordings") & " " & quoted form of dataDir & " " & quoted form of jobsDir & " " & quoted form of autoStatusDir & " " & quoted form of autoLogsDir & " " & quoted form of agentsDir & "; touch " & quoted form of channelsFile & " " & quoted form of schedulesFile & " " & quoted form of autoCheckFile
 
 -- ---------------------------------------------------------------- Menu loop
@@ -506,6 +517,7 @@ on enableAutoCheck(theURL, theName)
 	set artifactsArePresent to (do shell script "test -f " & quoted form of workerPath & " && test -f " & quoted form of plistPath & " && echo yes || echo no") is "yes"
 	set artifactsAreValid to false
 	if artifactsArePresent then set artifactsAreValid to my plistIsValid(plistPath)
+	if artifactsAreValid then set artifactsAreValid to my workerRequiresCurrentStreamlink(workerPath)
 	if serviceState is "loaded" and artifactsAreValid and (my isAutoEnabled(theURL)) then return true
 
 	if serviceState is "loaded" then
@@ -551,6 +563,14 @@ on enableAutoCheck(theURL, theName)
 		set worker to worker & "}" & linefeed
 		set worker to worker & "on_signal() { cleanup; exit 0; }" & linefeed
 		set worker to worker & "trap on_signal TERM INT" & linefeed & "trap cleanup EXIT" & linefeed
+		set worker to worker & "min_streamlink=8.6.2" & linefeed
+		set worker to worker & "streamlink_ok() {" & linefeed
+		set worker to worker & "  local ver" & linefeed
+		set worker to worker & "  ver=$(\"$streamlink\" --version 2>/dev/null | /usr/bin/awk 'NR==1 { print $2; exit }')" & linefeed
+		set worker to worker & "  printf '%s' \"$ver\" | /usr/bin/grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$' || return 1" & linefeed
+		set worker to worker & "  /usr/bin/awk -v v=\"$ver\" -v m=\"$min_streamlink\" 'BEGIN { n = split(v, a, \".\"); split(m, b, \".\"); for (i = 1; i <= 3; i++) { av = (i <= n ? a[i] + 0 : 0); bv = b[i] + 0; if (av < bv) exit 1; if (av > bv) exit 0 } exit 0 }'" & linefeed
+		set worker to worker & "}" & linefeed
+		set worker to worker & "if ! streamlink_ok; then printf '%s\\n' 'Streamlink 8.6.2 or newer is required' >>\"$log\"; exit 1; fi" & linefeed
 		set worker to worker & "while :; do" & linefeed
 		set worker to worker & "  write_status waiting \"\" \"\"" & linefeed
 		set worker to worker & "  trim_log" & linefeed
@@ -677,6 +697,25 @@ on plistIsValid(plistPath)
 		return false
 	end try
 end plistIsValid
+
+on streamlinkIsCurrent()
+	global streamlinkPath
+	try
+		do shell script "ver=$(" & quoted form of streamlinkPath & " --version 2>/dev/null | /usr/bin/awk 'NR==1 { print $2; exit }'); printf '%s' \"$ver\" | /usr/bin/grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$' || exit 2; /usr/bin/awk -v v=\"$ver\" -v m=8.6.2 'BEGIN { n = split(v, a, \".\"); split(m, b, \".\"); for (i = 1; i <= 3; i++) { av = (i <= n ? a[i] + 0 : 0); bv = b[i] + 0; if (av < bv) exit 1; if (av > bv) exit 0 } exit 0 }'"
+		return true
+	on error
+		return false
+	end try
+end streamlinkIsCurrent
+
+on workerRequiresCurrentStreamlink(workerPath)
+	try
+		do shell script "/usr/bin/grep -F -q 'min_streamlink=8.6.2' " & quoted form of workerPath
+		return true
+	on error
+		return false
+	end try
+end workerRequiresCurrentStreamlink
 
 on removeAutoArtifacts(workerPath, plistPath, statusPath)
 	do shell script "/bin/rm -f " & quoted form of workerPath & " " & quoted form of plistPath & " " & quoted form of statusPath
@@ -925,6 +964,10 @@ end scheduleFlow
 
 on createScheduledJob(theURL, theName, theMin, theHour, theDay, theMonth, dtStr)
 	global streamlinkPath, jobsDir, agentsDir, schedulesFile
+	if my streamlinkIsCurrent() is false then
+		my info("Streamlink update required", "SHOWROOM Recorder needs Streamlink 8.6.2 or newer." & return & return & "Streamlink 8.6.1 and older can be tricked into reading local files (GHSA-j7pf-m7gx-jr33)." & return & return & "Upgrade with:" & return & "    brew upgrade streamlink", "stop")
+		return
+	end if
 	set savePath to my getSavePath()
 	set label to "com.showroom.rec." & (do shell script "date +%s") & (random number from 1000 to 9999)
 	set plistPath to agentsDir & "/" & label & ".plist"
@@ -934,7 +977,14 @@ on createScheduledJob(theURL, theName, theMin, theHour, theDay, theMonth, dtStr)
 
 	-- Wrapper: records once, then unloads + deletes itself.
 	set wrapper to "#!/bin/bash" & linefeed
+	set wrapper to wrapper & "streamlink=" & quoted form of streamlinkPath & linefeed
+	set wrapper to wrapper & "min_streamlink=8.6.2" & linefeed
+	set wrapper to wrapper & "ver=$(\"$streamlink\" --version 2>/dev/null | /usr/bin/awk 'NR==1 { print $2; exit }')" & linefeed
+	set wrapper to wrapper & "streamlink_ok=0" & linefeed
+	set wrapper to wrapper & "if printf '%s' \"$ver\" | /usr/bin/grep -Eq '^[0-9]+\\.[0-9]+\\.[0-9]+$' && /usr/bin/awk -v v=\"$ver\" -v m=\"$min_streamlink\" 'BEGIN { n = split(v, a, \".\"); split(m, b, \".\"); for (i = 1; i <= 3; i++) { av = (i <= n ? a[i] + 0 : 0); bv = b[i] + 0; if (av < bv) exit 1; if (av > bv) exit 0 } exit 0 }'; then streamlink_ok=1; fi" & linefeed
+	set wrapper to wrapper & "if [ \"$streamlink_ok\" -eq 1 ]; then" & linefeed
 	set wrapper to wrapper & quoted form of streamlinkPath & " " & quoted form of theURL & " best -o " & quoted form of outFile & " --force --retry-streams 30" & linefeed
+	set wrapper to wrapper & "fi" & linefeed
 	set wrapper to wrapper & "/bin/launchctl unload " & quoted form of plistPath & " 2>/dev/null" & linefeed
 	set wrapper to wrapper & "/bin/rm -f " & quoted form of plistPath & " " & quoted form of wrapperPath & linefeed
 	my writeFile(wrapperPath, wrapper)

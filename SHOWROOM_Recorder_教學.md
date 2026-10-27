@@ -15,6 +15,8 @@
 
 Streamlink係錄影既核心軟件，冇佢就錄唔到！
 
+SHOWROOM Recorder 需要 **Streamlink 8.6.2 或更新**。8.6.1 同更舊版本有機會被惡意清單讀取本機檔案，所以 App 會拒絕錄影。請到 https://streamlink.github.io/ 重新安裝最新 Windows Installer，再用 `streamlink --version` 確認。如果之前開咗 Auto Check，升級後要再手動開啟。
+
 ### 2. 下載SHOWROOM Recorder
 1. 去GitHub：https://github.com/nestor625/SHOWROOM_Recorder
 2. 去 **Releases** 度
@@ -184,7 +186,7 @@ Auto Check 開關設定：
 ## ❓ 常見問題
 
 ### Q1: 點解錄唔到？
-- 確保Streamlink已經安裝
+- 確保 Streamlink **8.6.2 或更新** 已經安裝 (`streamlink --version`)
 - 確保channel係直播緊
 - 確保 `streamlink` 喺 `PATH` 入面。Auto Check 出錯時，先停用該 channel，
   再檢查 `logs\auto-<id>.log`。

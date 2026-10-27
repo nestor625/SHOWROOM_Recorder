@@ -1,7 +1,7 @@
 # SHOWROOM Recorder Tutorial
 
 ## Installation
-1. Install Streamlink: https://streamlink.github.io/
+1. Install Streamlink 8.6.2 or newer: https://streamlink.github.io/
 2. Extract SHOWROOM_Recorder_Win.zip
 3. Double-click SHOWROOM Recorder.bat
 

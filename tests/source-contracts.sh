@@ -1100,6 +1100,84 @@ documentation_contract() {
   require_literal "$changelog" 'at next login'
   require_literal "$changelog" 'record simultaneously'
   require_literal "$changelog" 'Selected **Stop** now stops only the selected recording'
+  require_literal "$changelog" 'Streamlink 8.6.2 is now the minimum'
+  require_literal "$changelog" 'GHSA-j7pf-m7gx-jr33'
+
+  require_literal "$windows_doc" 'Streamlink 8.6.2 or newer'
+  require_literal "$zh_doc" '8.6.2'
+  require_literal "$mac_doc" '8.6.2'
+  require_literal "$mac_doc" 'brew upgrade streamlink'
+}
+
+streamlink_version_contract() {
+  local win="$root/win/showroom-recorder.ps1"
+  local mac="$root/mac/showroom-recorder-mac-gui.scpt"
+  local sh="$root/mac/showroom-recorder-mac.sh"
+
+  require_literal "$win" 'function Test-MinimumStreamlinkVersion'
+  require_literal "$win" "[version]'8.6.2'"
+  require_literal "$win" 'GHSA-j7pf-m7gx-jr33'
+  require_literal "$win" "\$MinimumStreamlinkVersion = '8.6.2'"
+  require_literal "$win" "MinimumStreamlinkVersion = '8.6.2'"
+  require_literal "$win" 'function Test-WorkerStreamlinkVersion'
+  require_literal "$mac" 'on streamlinkIsCurrent()'
+  require_literal "$mac" 'on workerRequiresCurrentStreamlink(workerPath)'
+  require_literal "$mac" 'min_streamlink=8.6.2'
+  require_literal "$mac" 'GHSA-j7pf-m7gx-jr33'
+  require_literal "$mac" 'brew upgrade streamlink'
+  require_literal "$sh" 'min_streamlink=8.6.2'
+  require_literal "$sh" 'GHSA-j7pf-m7gx-jr33'
+  require_literal "$sh" 'brew upgrade streamlink'
+
+  shell_streamlink_version_runtime
+}
+
+shell_streamlink_version_runtime() {
+  local fake root_sh
+  root_sh="$root/mac/showroom-recorder-mac.sh"
+  fake=$(mktemp -d)
+  cat > "$fake/streamlink" << 'EOF'
+#!/bin/sh
+echo "streamlink 8.6.1"
+EOF
+  chmod +x "$fake/streamlink"
+  if PATH="$fake:$PATH" bash "$root_sh" >/tmp/sr-old-streamlink.out 2>/tmp/sr-old-streamlink.err; then
+    printf 'Mac shell must refuse Streamlink older than 8.6.2\n' >&2
+    rm -rf "$fake"
+    return 1
+  fi
+  grep -Fq '8.6.2' /tmp/sr-old-streamlink.out || {
+    printf 'Mac shell refusal must name the required Streamlink version\n' >&2
+    rm -rf "$fake"
+    return 1
+  }
+
+  cat > "$fake/streamlink" << 'EOF'
+#!/bin/sh
+echo "streamlink 8.6.2"
+EOF
+  chmod +x "$fake/streamlink"
+  # Current Streamlink reaches the interactive prompt. Close stdin so it exits without recording.
+  if ! PATH="$fake:$PATH" bash "$root_sh" </dev/null >/tmp/sr-new-streamlink.out 2>/tmp/sr-new-streamlink.err; then
+    # EOF on the menu prompt is acceptable (read returns non-zero under some bash settings).
+    if ! grep -Fq 'Record new URL' /tmp/sr-new-streamlink.out; then
+      printf 'Mac shell must accept Streamlink 8.6.2\n' >&2
+      rm -rf "$fake"
+      return 1
+    fi
+  else
+    grep -Fq 'Record new URL' /tmp/sr-new-streamlink.out || {
+      printf 'Mac shell must reach the menu with Streamlink 8.6.2\n' >&2
+      rm -rf "$fake"
+      return 1
+    }
+  fi
+  if grep -Fq 'out of date' /tmp/sr-new-streamlink.out || grep -Fq '8.6.2 or newer is required' /tmp/sr-new-streamlink.out; then
+    printf 'Mac shell must not reject Streamlink 8.6.2\n' >&2
+    rm -rf "$fake"
+    return 1
+  fi
+  rm -rf "$fake"
 }
 
 selected_stop_orders_selection_before_refresh() {
@@ -1144,6 +1222,6 @@ case "${1:-all}" in
   mac-artifacts) managed_artifact_contract ;;
   mac-stop) stop_recording_lifecycle_contract ;;
   mac-count) recording_count_contract ;;
-  all) windows_stop_contract; windows_auto_contract; windows_auto_check_append_contract; windows_ui_contract; windows_task_3b_review_fixes_contract; mac_auto_contract; mac_channel_storage_contract; windows_channel_storage_contract; documentation_contract ;;
+  all) windows_stop_contract; windows_auto_contract; windows_auto_check_append_contract; windows_ui_contract; windows_task_3b_review_fixes_contract; mac_auto_contract; mac_channel_storage_contract; windows_channel_storage_contract; documentation_contract; streamlink_version_contract ;;
   *) printf 'unknown contract: %s\n' "$1" >&2; exit 2 ;;
 esac
